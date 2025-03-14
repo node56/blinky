@@ -1,23 +1,11 @@
 #include "main.h"
+#include "circular_buffer.h"
 
-// UART receive buffers
-#define UART_BUFFER_SIZE 64
-uint8_t uart1_rx_buffer[UART_BUFFER_SIZE];
-uint32_t uart1_rx_head = 0;
-uint32_t uart1_rx_tail = 0;
-
-uint8_t uart2_rx_buffer[UART_BUFFER_SIZE];
-uint32_t uart2_rx_head = 0;
-uint32_t uart2_rx_tail = 0;
-
-// UART transmit buffers
-uint8_t uart1_tx_buffer[UART_BUFFER_SIZE];
-uint32_t uart1_tx_head = 0;
-uint32_t uart1_tx_tail = 0;
-
-uint8_t uart2_tx_buffer[UART_BUFFER_SIZE];
-uint32_t uart2_tx_head = 0;
-uint32_t uart2_tx_tail = 0;
+// UART buffers
+CircularBuffer uart1_rx_buffer;
+CircularBuffer uart2_rx_buffer;
+CircularBuffer uart1_tx_buffer;
+CircularBuffer uart2_tx_buffer;
 
 // Function prototypes
 void SystemClock_Config(void);
@@ -25,6 +13,7 @@ void MX_GPIO_Init(void);
 void MX_USART1_UART_Init(void);
 void MX_USART2_UART_Init(void);
 void state_machine(void);
+
 
 // UART initialization functions
 void MX_USART1_UART_Init(void) {
@@ -64,6 +53,8 @@ void MX_USART1_UART_Init(void) {
   NVIC_SetPriority(USART1_IRQn, 0);
   NVIC_EnableIRQ(USART1_IRQn);
   LL_USART_EnableIT_RXNE(USART1);
+  CircularBuffer_Init(&uart1_rx_buffer);
+  CircularBuffer_Init(&uart1_tx_buffer);
 }
 
 void MX_USART2_UART_Init(void) {
@@ -103,65 +94,47 @@ void MX_USART2_UART_Init(void) {
   NVIC_SetPriority(USART2_IRQn, 0);
   NVIC_EnableIRQ(USART2_IRQn);
   LL_USART_EnableIT_RXNE(USART2);
+  CircularBuffer_Init(&uart2_rx_buffer);
+  CircularBuffer_Init(&uart2_tx_buffer);
 }
 
 // UART interrupt handlers
 void USART1_IRQHandler(void) {
   if (LL_USART_IsActiveFlag_RXNE(USART1)) {
     uint8_t received_char = LL_USART_ReceiveData8(USART1);
-    uart1_rx_buffer[uart1_rx_head] = received_char;
-    uart1_rx_head = (uart1_rx_head + 1) % UART_BUFFER_SIZE;
-    if (uart1_rx_head == uart1_rx_tail) {
-      // Buffer overflow, drop the character
-      uart1_rx_tail = (uart1_rx_tail + 1) % UART_BUFFER_SIZE;
-    }
+    CircularBuffer_Put(&uart1_rx_buffer, received_char);
   }
 }
 
 void USART2_IRQHandler(void) {
   if (LL_USART_IsActiveFlag_RXNE(USART2)) {
     uint8_t received_char = LL_USART_ReceiveData8(USART2);
-    uart2_rx_buffer[uart2_rx_head] = received_char;
-    uart2_rx_head = (uart2_rx_head + 1) % UART_BUFFER_SIZE;
-    if (uart2_rx_head == uart2_rx_tail) {
-      // Buffer overflow, drop the character
-      uart2_rx_tail = (uart2_rx_tail + 1) % UART_BUFFER_SIZE;
-    }
+    CircularBuffer_Put(&uart2_rx_buffer, received_char);
   }
 }
 
 // State machine function
 void state_machine(void) {
+  uint8_t char_to_send;
+
   // Check for received characters and echo them
-  if (uart1_rx_head != uart1_rx_tail) {
-    uint8_t char_to_send = uart1_rx_buffer[uart1_rx_tail];
-    uart1_rx_tail = (uart1_rx_tail + 1) % UART_BUFFER_SIZE;
+  if (CircularBuffer_Get(&uart1_rx_buffer, &char_to_send)) {
     // Add to transmit buffers
-    uart1_tx_buffer[uart1_tx_head] = char_to_send;
-    uart1_tx_head = (uart1_tx_head + 1) % UART_BUFFER_SIZE;
-    uart2_tx_buffer[uart2_tx_head] = char_to_send;
-    uart2_tx_head = (uart2_tx_head + 1) % UART_BUFFER_SIZE;
+    CircularBuffer_Put(&uart1_tx_buffer, char_to_send);
+    CircularBuffer_Put(&uart2_tx_buffer, char_to_send);
   }
 
-  if (uart2_rx_head != uart2_rx_tail) {
-    uint8_t char_to_send = uart2_rx_buffer[uart2_rx_tail];
-    uart2_rx_tail = (uart2_rx_tail + 1) % UART_BUFFER_SIZE;
+  if (CircularBuffer_Get(&uart2_rx_buffer, &char_to_send)) {
     // Add to transmit buffers
-    uart1_tx_buffer[uart1_tx_head] = char_to_send;
-    uart1_tx_head = (uart1_tx_head + 1) % UART_BUFFER_SIZE;
-    uart2_tx_buffer[uart2_tx_head] = char_to_send;
-    uart2_tx_head = (uart2_tx_head + 1) % UART_BUFFER_SIZE;
+    CircularBuffer_Put(&uart1_tx_buffer, char_to_send);
+    CircularBuffer_Put(&uart2_tx_buffer, char_to_send);
   }
 
   // Transmit from buffers if not busy
-  if ((uart1_tx_head != uart1_tx_tail) && LL_USART_IsActiveFlag_TXE(USART1)) {
-    uint8_t char_to_send = uart1_tx_buffer[uart1_tx_tail];
-    uart1_tx_tail = (uart1_tx_tail + 1) % UART_BUFFER_SIZE;
+  if (LL_USART_IsActiveFlag_TXE(USART1) && CircularBuffer_Get(&uart1_tx_buffer, &char_to_send)) {
     LL_USART_TransmitData8(USART1, char_to_send);
   }
-  if ((uart2_tx_head != uart2_tx_tail) && LL_USART_IsActiveFlag_TXE(USART2)) {
-    uint8_t char_to_send = uart2_tx_buffer[uart2_tx_tail];
-    uart2_tx_tail = (uart2_tx_tail + 1) % UART_BUFFER_SIZE;
+  if (LL_USART_IsActiveFlag_TXE(USART2) && CircularBuffer_Get(&uart2_tx_buffer, &char_to_send)) {
     LL_USART_TransmitData8(USART2, char_to_send);
   }
 
